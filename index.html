@@ -1,0 +1,446 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>放缩圆法 · 磁场临界问题可视化</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #f2f5f9; color: #1f2933;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 24px 16px;
+  }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .sub { font-size: 14px; color: #52606d; margin-bottom: 18px; text-align: center; line-height: 1.7; }
+  .btn-bar { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 18px; }
+  button {
+    border: 1px solid #cbd2d9; background: #fff; color: #334155;
+    padding: 9px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: all .15s;
+  }
+  button:hover { border-color: #1c7ed6; color: #1c7ed6; }
+  button.active { background: #1c7ed6; border-color: #1c7ed6; color: #fff; }
+  #replay { background: #343a40; color: #fff; border-color: #343a40; }
+  #replay:hover { background: #495057; color: #fff; }
+  .stage { width: 100%; display: flex; justify-content: center; }
+  canvas {
+    background: #fff; border: 1px solid #d9e2ec; border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(31,41,51,.10); max-width: 100%;
+  }
+  .info {
+    margin-top: 16px; max-width: 760px; background: #fff; border-radius: 10px;
+    padding: 14px 18px; font-size: 14px; line-height: 1.8; color: #334155; border: 1px solid #e4e7eb;
+  }
+  .info b { color: #1c7ed6; }
+  .crit-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+</style>
+</head>
+<body>
+
+<h1>“放缩圆法”分析磁场临界问题</h1>
+<div class="sub">入射粒子速度方向相同、大小不同 → 轨迹圆圆心共线（垂直于初速度方向）；半径 R = mv/qB，速度越大圆越大，速度箭头同步变长；穿出边界的轨迹段以淡虚线表示</div>
+
+<div class="btn-bar" id="btnBar">
+  <button data-mode="core" class="active">核心原理图</button>
+  <button data-mode="m1">① 单边界磁场</button>
+  <button data-mode="m2">② 平行边界缩放</button>
+  <button data-mode="m3">③ 三角形边界</button>
+  <button data-mode="m4">④ 矩形边界</button>
+  <button id="replay">重播动画</button>
+</div>
+<div class="btn-bar" id="varBar" style="display:none">
+  <button data-var="normal" class="active">普通矩形（可切右边）</button>
+  <button data-var="wide">长矩形（够不到右边）</button>
+</div>
+
+<div class="stage"><canvas id="cvs" width="760" height="500"></canvas></div>
+
+<div class="info" id="info"></div>
+
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const W = cvs.width, H = cvs.height;
+
+let current = null;
+let shown = [];
+let timer = null;
+const N = 24; // 圆的数量
+
+/* ---------- 基础辅助 ---------- */
+function line(x1,y1,x2,y2){ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+function dashed(x1,y1,x2,y2){ ctx.save(); ctx.setLineDash([6,5]); line(x1,y1,x2,y2); ctx.restore(); }
+function drawCrosses(x0,y0,x1,y1){
+  ctx.save(); ctx.strokeStyle = '#9aa5b1'; ctx.lineWidth = 1;
+  for(let x=x0+26;x<x1;x+=52) for(let y=y0+26;y<y1;y+=52){
+    ctx.beginPath();
+    ctx.moveTo(x-5,y-5); ctx.lineTo(x+5,y+5);
+    ctx.moveTo(x+5,y-5); ctx.lineTo(x-5,y+5);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function arrowHead(x,y,dx,dy){
+  const a=Math.atan2(dy,dx), s=9;
+  ctx.beginPath();
+  ctx.moveTo(x,y);
+  ctx.lineTo(x-s*Math.cos(a-0.4), y-s*Math.sin(a-0.4));
+  ctx.moveTo(x,y);
+  ctx.lineTo(x-s*Math.cos(a+0.4), y-s*Math.sin(a+0.4));
+  ctx.stroke();
+}
+function vhat(angle){ return {x:Math.cos(angle), y:Math.sin(angle)}; }
+function nhat(angle, side){
+  const v=vhat(angle);
+  return side===1 ? {x:v.y, y:-v.x} : {x:-v.y, y:v.x};
+}
+function footPoint(O,A,B){
+  const d={x:B.x-A.x,y:B.y-A.y};
+  const t=((O.x-A.x)*d.x+(O.y-A.y)*d.y)/(d.x*d.x+d.y*d.y);
+  return {x:A.x+t*d.x, y:A.y+t*d.y, t};
+}
+// 圆过 P、圆心沿 n̂，与直线 AB 相切，返回半径（取正解）
+function tangentToLine(P, n, A, B){
+  const d={x:B.x-A.x,y:B.y-A.y}, L=Math.hypot(d.x,d.y);
+  const c0=d.x*(P.y-A.y)-d.y*(P.x-A.x);
+  const cn=d.x*n.y-d.y*n.x;
+  const cands=[-c0/(cn-L), -c0/(cn+L)];
+  const r=cands.find(v=>v>1);
+  return r||null;
+}
+
+/* ---------- 半径数组 ---------- */
+function buildRs(rMin, rMax, critRs){
+  const arr=[];
+  for(let i=0;i<N;i++) arr.push(rMin+(rMax-rMin)*i/(N-1));
+  critRs.forEach(r=>{ if(r&&r>rMin&&r<rMax&&!arr.some(a=>Math.abs(a-r)<4)) arr.push(r); });
+  arr.sort((a,b)=>a-b);
+  return arr;
+}
+
+/* ---------- 模式配置 ---------- */
+const MODES = {
+  core: {
+    P:{x:380,y:420}, angle:-28*Math.PI/180, side:1,
+    rMin:18, rMax:185, criticals:[],
+    inside:()=>true,
+    info:'<b>核心原理图：</b>同一入射点 P，初速度方向相同、大小不同；各轨迹圆圆心落在垂直于初速度 v 的直线 PP′ 上（圆心共线）。速度越大，半径 R = mv/qB 越大，圆沿该直线放缩，速度箭头同步变长。',
+    boundary(){ drawCrosses(40,30,W-40,H-30); },
+    extra(){
+      const n=this.n(), P=this.P;
+      dashed(P.x-260*n.x,P.y-260*n.y,P.x+190*n.x,P.y+190*n.y);
+      ctx.fillStyle='#52606d'; ctx.font='14px sans-serif';
+      ctx.fillText('P',P.x-24,P.y+18);
+      ctx.fillText("P′",P.x-250*n.x-14,P.y-250*n.y-8);
+      ctx.save(); ctx.setLineDash([4,4]); ctx.strokeStyle='#b0bec9';
+      line(P.x,P.y,P.x+120,P.y); ctx.restore();
+    }
+  },
+
+  m1: {
+    P:{x:240,y:390}, angle:-58*Math.PI/180, side:1,
+    rMin:18, rMax:170,
+    inside:(x,y)=>y<=390,
+    info:'<b>① 单边界磁场：</b>粒子从直线边界上的 P 点以相同方向、不同速度射入磁场。圆心在垂直于 v 的直线上放缩；红色临界圆擦过边界关键点，半径再大便从边界另一侧射出。边界外的轨迹段以淡虚线表示。',
+    boundary(){
+      drawCrosses(40,40,W-40,390);
+      ctx.save(); ctx.strokeStyle='#1f2933'; ctx.lineWidth=2.5;
+      line(60,390,W-60,390); ctx.restore();
+      this.extra();
+    },
+    extra(){
+      const n=this.n(), P=this.P;
+      dashed(P.x-40*n.x,P.y-40*n.y,P.x+160*n.x,P.y+160*n.y);
+      ctx.fillStyle='#52606d'; ctx.font='14px sans-serif';
+      ctx.fillText('P',P.x-22,P.y+20);
+    },
+    init(){
+      const R=this.Rs[Math.floor(this.Rs.length*0.62)];
+      this.criticals=[{R, color:'#e03131', edge:'边界擦边圆', O:this.O(R), T:null}];
+    }
+  },
+
+  m2: {
+    xL:210, xR:410,
+    P:{x:210,y:290}, angle:-30*Math.PI/180, side:-1,
+    rMin:16, rMax:210,
+    inside(px,py){ return px>=this.xL&&px<=this.xR; },
+    info:'<b>② 平行边界缩放（竖直板）：</b>两竖直平行板间距 d，粒子从左边界 A 以与板成 60° 角斜向上射入。圆心在垂直于 v 的共线上放缩；临界圆与右边界相切。R 小于临界值从左边界射出，R 大于临界值从右边界穿出。板外轨迹以淡虚线表示。',
+    boundary(){
+      drawCrosses(this.xL,70,this.xR,430);
+      ctx.save(); ctx.strokeStyle='#1f2933'; ctx.lineWidth=2.5;
+      line(this.xL,70,this.xL,430); line(this.xR,70,this.xR,430); ctx.restore();
+      ctx.save(); ctx.strokeStyle='#52606d'; ctx.fillStyle='#52606d'; ctx.font='15px sans-serif';
+      ctx.fillText('M',this.xL-24,64); ctx.fillText('N',this.xL-24,448);
+      ctx.fillText('P',this.xR+12,64); ctx.fillText('Q',this.xR+12,448);
+      dashed(this.xL,448,this.xR,448); ctx.fillText('d',(this.xL+this.xR)/2-6,466);
+      ctx.restore();
+      this.extra();
+    },
+    extra(){
+      const n=this.n(), P=this.P;
+      dashed(P.x-90*n.x,P.y-90*n.y,P.x+170*n.x,P.y+170*n.y);
+      ctx.fillStyle='#52606d'; ctx.font='15px sans-serif';
+      ctx.fillText('A',P.x-24,P.y+20);
+      // 60° 角标注：左板向上方向 与 速度方向之间
+      ctx.save();
+      ctx.strokeStyle='#52606d'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.arc(P.x,P.y,20,-90*Math.PI/180,this.angle,false); ctx.stroke();
+      ctx.fillText('60°',P.x+14,P.y-12);
+      ctx.restore();
+    },
+    init(){
+      const d=this.xR-this.xL, nx=this.n().x;
+      const R=d/(1+nx);
+      const O=this.O(R);
+      this.criticals=[{R, color:'#e03131', edge:'右边界（相切）',
+        O, T:{x:this.xR, y:O.y}}];
+    }
+  },
+
+  m3: {
+    A:{x:230,y:355}, B:{x:310,y:150}, C:{x:390,y:355},
+    P:{x:230,y:355}, angle:-30*Math.PI/180, side:1,
+    rMin:18, rMax:250,
+    info:'<b>③ 三角形边界：</b>粒子从顶点 A 射入，圆族沿垂直于 v 的方向放缩。橙色临界圆与 BC 边相切，切点、圆心 O 与半径 R 已标注；三角形外的轨迹段以淡虚线表示。',
+    boundary(){
+      drawCrosses(180,110,440,380);
+      ctx.save(); ctx.strokeStyle='#1f2933'; ctx.lineWidth=2.5;
+      line(this.A.x,this.A.y,this.B.x,this.B.y);
+      line(this.B.x,this.B.y,this.C.x,this.C.y);
+      line(this.C.x,this.C.y,this.A.x,this.A.y); ctx.restore();
+      ctx.fillStyle='#52606d'; ctx.font='15px sans-serif';
+      ctx.fillText('A',this.A.x-24,this.A.y+20);
+      ctx.fillText('B',this.B.x-6,this.B.y-10);
+      ctx.fillText('C',this.C.x+10,this.C.y+6);
+      this.extra();
+    },
+    extra(){
+      const n=this.n(), P=this.P;
+      dashed(P.x-40*n.x,P.y-40*n.y,P.x+180*n.x,P.y+180*n.y);
+    },
+    inside(px,py){
+      const {A,B,C}=this;
+      const r={x:px,y:py};
+      const cross=(p,q,r2)=>(q.x-p.x)*(r2.y-p.y)-(q.y-p.y)*(r2.x-p.x);
+      return cross(A,B,r)>=0&&cross(B,C,r)>=0&&cross(C,A,r)>=0;
+    },
+    init(){
+      const A=this.A,B=this.B,C=this.C;
+      let best=null;
+      for(const side of [1,-1]){
+        for(let deg=-80;deg<=-5;deg+=5){
+          const ang=deg*Math.PI/180;
+          const n=nhat(ang,side);
+          const R=tangentToLine(A,n,B,C);
+          if(!R||R<20||R>250) continue;
+          const O={x:A.x+R*n.x, y:A.y+R*n.y};
+          const T=footPoint(O,B,C);
+          if(T.t>=0.03&&T.t<=0.97){
+            if(!best||R<best.R) best={side,ang,R,O,T};
+          }
+        }
+      }
+      if(best){
+        this.angle=best.ang; this.side=best.side;
+        this.criticals=[{R:best.R,color:'#f76707',edge:'BC 边（相切）',O:best.O,T:best.T}];
+      } else {
+        this.criticals=[];
+      }
+    }
+  },
+
+  m4: {
+    xL:170, normalX:560, wideX:700, xR:560, yT:150, yB:400,
+    P:{x:170,y:270}, angle:-60*Math.PI/180, side:-1,
+    rMin:16, rMax:250, variant:'normal',
+    inside(px,py){ return px>=this.xL&&px<=this.xR&&py>=this.yT&&py<=this.yB; },
+    info:'<b>④ 矩形边界（普通）：</b>粒子从左边界 AB 射入，圆族沿同一偏转趋势继续放缩，依次与下边、右边、上边相切。各色临界圆均标注切点、圆心 O 与半径 R；矩形外轨迹以淡虚线表示。',
+    infoWide:'<b>④ 矩形边界（长矩形）：</b>矩形水平长度较大，圆族放缩后只能与下边、上边相切；即使半径继续增大，轨迹也无法触及右侧边界（右边相切半径超出可达范围）。矩形外轨迹以淡虚线表示。',
+    boundary(){
+      drawCrosses(this.xL,this.yT,this.xR,this.yB);
+      ctx.save(); ctx.strokeStyle='#1f2933'; ctx.lineWidth=2.5;
+      ctx.strokeRect(this.xL,this.yT,this.xR-this.xL,this.yB-this.yT); ctx.restore();
+      ctx.fillStyle='#52606d'; ctx.font='15px sans-serif';
+      ctx.fillText('A',this.xL-22,this.yT+16); ctx.fillText('B',this.xL-22,this.yB+6);
+      this.extra();
+    },
+    extra(){
+      const n=this.n(), P=this.P;
+      dashed(P.x-40*n.x,P.y-40*n.y,P.x+180*n.x,P.y+180*n.y);
+    },
+    init(){
+      this.xR = this.variant==='wide'?this.wideX:this.normalX;
+      const n=this.n();
+      // 下边相切：圆下沿 = yB
+      const Rb=(this.yB-this.P.y)/(1+n.y);
+      const Ob=this.O(Rb);
+      // 右边相切：圆右沿 = xR
+      const Rr=(this.xR-this.xL)/(1+n.x);
+      const Or=this.O(Rr);
+      // 上边相切（同一偏转趋势）：圆上沿 = yT
+      const Rt=(this.P.y-this.yT)/(1-n.y);
+      const Ot=this.O(Rt);
+      this.criticals=[
+        {R:Rb, color:'#7048e8', edge:'下边（相切）', O:Ob, T:{x:Ob.x, y:this.yB}}
+      ];
+      if(this.variant==='normal'){
+        this.criticals.push({R:Rr, color:'#2f9e44', edge:'右边（相切）', O:Or, T:{x:this.xR, y:Or.y}});
+      }
+      this.criticals.push({R:Rt, color:'#e03131', edge:'上边（相切）', O:Ot, T:{x:Ot.x, y:this.yT}});
+    }
+  }
+};
+
+/* 绑定派生方法 */
+Object.values(MODES).forEach(m=>{
+  m.v=()=>vhat(m.angle);
+  m.n=()=>nhat(m.angle,m.side);
+  m.O=R=>({x:m.P.x+R*m.n().x, y:m.P.y+R*m.n().y});
+  m.Rs=buildRs(m.rMin,m.rMax,(m.init?[]:[]));
+  if(m.init){ m.init(); m.Rs=buildRs(m.rMin,m.rMax,m.criticals.map(c=>c.R)); }
+});
+
+/* ---------- 动画 ---------- */
+function stopTimer(){ if(timer){ clearInterval(timer); timer=null; } }
+
+function drawArrow(P, v, R, color, alpha){
+  const len=14+0.30*R;
+  const ex=P.x+len*v.x, ey=P.y+len*v.y;
+  ctx.save(); ctx.strokeStyle=color; ctx.globalAlpha=alpha; ctx.lineWidth=1.8;
+  line(P.x,P.y,ex,ey); arrowHead(ex,ey,v.x,v.y);
+  ctx.restore();
+}
+
+/* 分段裁剪：边界内实线，边界外淡虚线 */
+function drawCircleClipped(O,R,color,crit){
+  const SEG=72;
+  const inside=current.inside;
+  for(let i=0;i<SEG;i++){
+    const a0=2*Math.PI*i/SEG, a1=2*Math.PI*(i+1)/SEG;
+    const x0=O.x+R*Math.cos(a0), y0=O.y+R*Math.sin(a0);
+    const x1=O.x+R*Math.cos(a1), y1=O.y+R*Math.sin(a1);
+    const inSide=inside.call(current,(x0+x1)/2,(y0+y1)/2);
+    ctx.save();
+    if(inSide){
+      ctx.strokeStyle=color; ctx.globalAlpha=crit?1:0.68;
+      ctx.lineWidth=crit?2.6:1.1; ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle='#adb5bd'; ctx.globalAlpha=crit?0.4:0.22;
+      ctx.lineWidth=1; ctx.setLineDash([3,4]);
+    }
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawCircleEntry(idx){
+  const R=current.Rs[idx];
+  const crit=current.criticals.find(c=>Math.abs(c.R-R)<4);
+  const O=crit?crit.O:current.O(R);
+  const color=crit?crit.color:'#1c7ed6';
+  drawCircleClipped(O,R,color,!!crit);
+  // 圆心
+  ctx.fillStyle='#334155';
+  ctx.fillRect(O.x-3,O.y-3,6,6);
+  // 速度箭头（随 R 变长）
+  drawArrow(current.P, current.v(), R, crit?color:'#52606d', crit?0.9:0.18);
+}
+
+function drawAnnotations(){
+  current.criticals.forEach((c)=>{
+    const idx=current.Rs.findIndex(a=>Math.abs(a-c.R)<4);
+    if(idx<0||!shown.includes(idx)) return;
+    const {O,T,color,edge,R}=c;
+    if(T){
+      ctx.fillStyle=color;
+      ctx.beginPath(); ctx.arc(T.x,T.y,5,0,Math.PI*2); ctx.fill();
+      ctx.save(); ctx.strokeStyle=color; ctx.setLineDash([4,4]); ctx.lineWidth=1.2;
+      line(O.x,O.y,T.x,T.y); ctx.restore();
+    }
+    ctx.fillStyle=color; ctx.font='13px sans-serif';
+    ctx.fillText('O',O.x+7,O.y-6);
+    if(T){
+      ctx.fillText('R='+Math.round(R), (O.x+T.x)/2+8, (O.y+T.y)/2-6);
+      ctx.fillText(edge, T.x+10, T.y+16);
+    } else {
+      ctx.fillText('R='+Math.round(R), O.x+12, O.y+18);
+      ctx.fillText(edge, O.x+12, O.y+34);
+    }
+  });
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  ctx.setLineDash([]);
+  current.boundary();
+  ctx.fillStyle='#2f3542';
+  ctx.beginPath(); ctx.arc(current.P.x,current.P.y,4.5,0,Math.PI*2); ctx.fill();
+  shown.forEach(drawCircleEntry);
+  drawAnnotations();
+}
+
+function renderInfo(){
+  let html=(current.variant==='wide'&&current.infoWide)?current.infoWide:current.info;
+  if(current.criticals.length){
+    html+='<div class="crit-list">';
+    current.criticals.forEach(c=>{
+      html+=`<span><b style="color:${c.color}">■</b> ${c.edge}：圆心 O(${Math.round(c.O.x)},${Math.round(c.O.y)})，R≈${Math.round(c.R)}</span>`;
+    });
+    html+='</div>';
+  }
+  document.getElementById('info').innerHTML=html;
+}
+
+function startPlayback(){
+  stopTimer();
+  let i=0;
+  timer=setInterval(()=>{
+    if(i<current.Rs.length){ shown.push(i); i++; render(); }
+    else stopTimer();
+  },500);
+}
+
+function applyVariant(v){
+  stopTimer();
+  current.variant=v;
+  current.init();
+  current.Rs=buildRs(current.rMin,current.rMax,current.criticals.map(c=>c.R));
+  shown=[];
+  document.querySelectorAll('#varBar button').forEach(x=>x.classList.toggle('active',x.dataset.var===v));
+  renderInfo();
+  render();
+  startPlayback();
+}
+
+function startMode(key){
+  stopTimer();
+  current=MODES[key];
+  shown=[];
+  document.querySelectorAll('#btnBar button[data-mode]').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode===key);
+  });
+  document.getElementById('varBar').style.display = key==='m4' ? 'flex' : 'none';
+  if(key==='m4'){ applyVariant('normal'); return; }
+  renderInfo();
+  render();
+  startPlayback();
+}
+
+document.querySelectorAll('#btnBar button[data-mode]').forEach(btn=>{
+  btn.addEventListener('click',()=>startMode(btn.dataset.mode));
+});
+document.querySelectorAll('#varBar button').forEach(btn=>{
+  btn.addEventListener('click',()=>applyVariant(btn.dataset.var));
+});
+document.getElementById('replay').addEventListener('click',()=>{
+  const active=document.querySelector('#btnBar button.active');
+  startMode(active?active.dataset.mode:'core');
+});
+
+startMode('core');
+</script>
+</body>
+</html>
+<!-- （注：内容由AI生成） -->
